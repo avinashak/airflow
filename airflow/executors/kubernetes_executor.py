@@ -33,6 +33,8 @@ from typing import Any, Dict, List, Optional, Tuple
 from kubernetes import client, watch
 from kubernetes.client import Configuration, models as k8s
 from kubernetes.client.rest import ApiException
+from kubernetes.client.api_client import ApiClient
+
 from urllib3.exceptions import ReadTimeoutError
 
 from airflow.exceptions import AirflowException
@@ -667,6 +669,8 @@ class KubernetesExecutor(BaseExecutor, LoggingMixin):
             str(self.scheduler_job_id)
         )
         pod_id = annotations_to_key(pod.metadata.annotations)
+        api_client = ApiClient()
+
         if pod_id not in pod_ids:
             self.log.error("attempting to adopt taskinstance which was not specified by database: %s", pod_id)
             return
@@ -675,12 +679,23 @@ class KubernetesExecutor(BaseExecutor, LoggingMixin):
             kube_client.patch_namespaced_pod(
                 name=pod.metadata.name,
                 namespace=pod.metadata.namespace,
-                body=PodGenerator.serialize_pod(pod),
+                body=api_client.sanitize_for_serialization(
+                    self._get_label_update_request_body(pod.metadata.labels)
+                ),
             )
             pod_ids.pop(pod_id)
             self.running.add(pod_id)
         except ApiException as e:
             self.log.info("Failed to adopt pod %s. Reason: %s", pod.metadata.name, e)
+
+    def _get_label_update_request_body(self, labels: List[str]):
+        return {
+            'apiVersion': 'v1',
+            'kind': 'Pod',
+            'metadata': {
+                'labels': labels
+            }
+        }
 
     def _adopt_completed_pods(self, kube_client: client.CoreV1Api) -> None:
         """
@@ -694,6 +709,8 @@ class KubernetesExecutor(BaseExecutor, LoggingMixin):
             'label_selector': 'kubernetes_executor=True',
         }
         pod_list = kube_client.list_namespaced_pod(namespace=self.kube_config.kube_namespace, **kwargs)
+        api_client = ApiClient()
+
         for pod in pod_list.items:
             self.log.info("Attempting to adopt pod %s", pod.metadata.name)
             pod.metadata.labels['airflow-worker'] = pod_generator.make_safe_label_value(
@@ -703,7 +720,9 @@ class KubernetesExecutor(BaseExecutor, LoggingMixin):
                 kube_client.patch_namespaced_pod(
                     name=pod.metadata.name,
                     namespace=pod.metadata.namespace,
-                    body=PodGenerator.serialize_pod(pod),
+                    body=api_client.sanitize_for_serialization(
+                        self._get_label_update_request_body(pod.metadata.labels)
+                    ),
                 )
             except ApiException as e:
                 self.log.info("Failed to adopt pod %s. Reason: %s", pod.metadata.name, e)
